@@ -74,6 +74,10 @@ class AndroidPathMapper:
         if token in UNMAPPABLE_TOKENS:
             return None, f"Token '{token}' has no filesystem equivalent"
 
+        # Unmappable domains (Live Data from Magnet Quick Image)
+        if domain == 'Live Data':
+            return None, "Live Data (agent-captured, not a filesystem copy)"
+
         # Shared storage: shared/N -> /data/media/N/
         if domain.startswith('shared/'):
             parts = domain.split('/', 1)

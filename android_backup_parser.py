@@ -61,6 +61,40 @@ TOKEN_PATH_MAPPINGS = {
 KNOWN_TOKENS = set(TOKEN_PATH_MAPPINGS.keys()) | UNMAPPABLE_TOKENS
 
 
+def parse_tar_path(member_name: str) -> Tuple[str, str, str]:
+    """Parse a tar member name into (domain, token, relative_path).
+
+    Returns:
+        (domain, token, relative_path) where:
+        - domain: package name or "shared/N"
+        - token: AOSP backup token or ""
+        - relative_path: token + remaining path for tree display
+    """
+    parts = member_name.strip('./').split('/')
+
+    if parts[0] == 'apps' and len(parts) >= 2:
+        package_name = parts[1]
+        if len(parts) >= 3:
+            potential_token = parts[2]
+            if potential_token in KNOWN_TOKENS:
+                token = potential_token
+                relative_path = '/'.join(parts[2:])
+                return package_name, token, relative_path
+            else:
+                relative_path = '/'.join(parts[2:])
+                return package_name, potential_token, relative_path
+        else:
+            return package_name, '', ''
+
+    elif parts[0] == 'shared' and len(parts) >= 2:
+        domain = f"shared/{parts[1]}"
+        relative_path = '/'.join(parts[2:]) if len(parts) > 2 else ''
+        return domain, '', relative_path
+
+    else:
+        return parts[0], '', '/'.join(parts[1:]) if len(parts) > 1 else ''
+
+
 class AndroidBackupError(Exception):
     """Exception raised for Android backup parsing errors."""
     pass
@@ -287,43 +321,8 @@ class AndroidBackupParser:
 
     @staticmethod
     def _parse_tar_path(member_name: str) -> Tuple[str, str, str]:
-        """Parse a tar member name into (domain, token, relative_path).
-
-        Returns:
-            (domain, token, relative_path) where:
-            - domain: package name or "shared/N"
-            - token: AOSP backup token or ""
-            - relative_path: token + remaining path for tree display
-        """
-        parts = member_name.strip('./').split('/')
-
-        if parts[0] == 'apps' and len(parts) >= 2:
-            package_name = parts[1]
-            if len(parts) >= 3:
-                # Check if parts[2] is a known token
-                potential_token = parts[2]
-                # Handle device-encrypted tokens that contain underscores (d_r, d_f, etc.)
-                if potential_token in KNOWN_TOKENS:
-                    token = potential_token
-                    relative_path = '/'.join(parts[2:])
-                    return package_name, token, relative_path
-                else:
-                    # Unknown token - treat the whole remaining path as relative
-                    relative_path = '/'.join(parts[2:])
-                    return package_name, potential_token, relative_path
-            else:
-                # Just "apps/<package>" with no further path
-                return package_name, '', ''
-
-        elif parts[0] == 'shared' and len(parts) >= 2:
-            # shared/<N>/<path>
-            domain = f"shared/{parts[1]}"
-            relative_path = '/'.join(parts[2:]) if len(parts) > 2 else ''
-            return domain, '', relative_path
-
-        else:
-            # Unknown top-level structure
-            return parts[0], '', '/'.join(parts[1:]) if len(parts) > 1 else ''
+        """Parse a tar member name into (domain, token, relative_path)."""
+        return parse_tar_path(member_name)
 
     def parse(self, password_callback=None, progress_callback=None) -> AndroidBackup:
         """

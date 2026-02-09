@@ -18,6 +18,7 @@ import threading
 
 from ios_backup_parser import iOSBackupParser, iOSBackup, BackupFile
 from android_backup_parser import AndroidBackupParser, AndroidBackup, AndroidBackupFile
+from magnet_parser import MagnetQuickImageParser
 from filesystem_loader import FilesystemLoader, FilesystemAcquisition, FilesystemFile
 from path_mapper import PathMapper, PathMapping, MappingStatus, MappingStatistics
 from android_path_mapper import AndroidPathMapper
@@ -1062,20 +1063,24 @@ class MainApplication(tk.Tk):
             self._load_backup_from_path(path)
 
     def _load_backup_from_path(self, path: str):
-        """Load a backup from the given path (auto-detects iOS vs Android)."""
+        """Load a backup from the given path (auto-detects iOS vs Android vs Magnet)."""
         if iOSBackupParser.is_ios_backup(path):
             self.backup_type = 'ios'
             self._load_ios_backup(path)
         elif AndroidBackupParser.is_android_backup(path):
             self.backup_type = 'android'
             self._load_android_backup(path)
+        elif MagnetQuickImageParser.is_magnet_quick_image(path):
+            self.backup_type = 'android'
+            self._load_magnet_backup(path)
         else:
             messagebox.showerror(
                 "Error",
                 "Selected path is not a recognized backup format.\n\n"
                 "Supported formats:\n"
                 "- iOS backup (directory with Manifest.db or ZIP)\n"
-                "- Android backup (.ab file)"
+                "- Android backup (.ab file)\n"
+                "- Magnet Acquire Quick Image (ZIP or directory)"
             )
 
     def _load_android_backup(self, path: str):
@@ -1123,6 +1128,46 @@ class MainApplication(tk.Tk):
             self.status_bar.progress.configure(mode='determinate')
             self.status_bar.hide_progress()
             messagebox.showerror("Error", f"Failed to load Android backup: {e}")
+            self.status_bar.set_status("Failed to load backup")
+
+    def _load_magnet_backup(self, path: str):
+        """Load a Magnet Acquire Quick Image from the given path."""
+        self.status_bar.set_status(f"Loading Magnet Quick Image from {path}...")
+        self.status_bar.progress.configure(mode='determinate')
+        self.status_bar.show_progress()
+        self.status_bar.progress['value'] = 0
+        self.update_idletasks()
+
+        try:
+            parser = MagnetQuickImageParser(path)
+
+            def progress_callback(current, total, message):
+                if total > 0:
+                    self.status_bar.progress['value'] = current
+                self.status_bar.set_status(message)
+                self.update_idletasks()
+
+            self.backup = parser.parse(progress_callback=progress_callback)
+            self._backup_parser = parser
+
+            self.status_bar.set_status("Building backup tree...")
+            self.status_bar.progress['value'] = 95
+            self.update_idletasks()
+
+            self.backup_tree.load_backup(self.backup)
+
+            file_count = len([f for f in self.backup.files if not f.is_directory])
+            self.status_bar.progress['value'] = 100
+            self.status_bar.hide_progress()
+            self.status_bar.set_status(f"Loaded Magnet Quick Image: {file_count} files")
+
+            if self.filesystem:
+                self._run_mapping()
+
+        except Exception as e:
+            self.status_bar.progress.configure(mode='determinate')
+            self.status_bar.hide_progress()
+            messagebox.showerror("Error", f"Failed to load Magnet Quick Image: {e}")
             self.status_bar.set_status("Failed to load backup")
 
     def _load_ios_backup(self, path: str):
@@ -1606,7 +1651,7 @@ class MainApplication(tk.Tk):
         try:
             # Get backup file content
             if self.backup_type == 'android':
-                backup_content = AndroidBackupParser.get_file_content(self.backup, mapping.backup_file)
+                backup_content = self._backup_parser.get_file_content(self.backup, mapping.backup_file)
             else:
                 parser = iOSBackupParser(self.backup.path)
                 backup_content = parser.get_file_content(self.backup, mapping.backup_file)
@@ -1696,7 +1741,7 @@ class MainApplication(tk.Tk):
         try:
             # Extract main file
             if self.backup_type == 'android':
-                content = AndroidBackupParser.get_file_content(self.backup, backup_file)
+                content = self._backup_parser.get_file_content(self.backup, backup_file)
             else:
                 parser = iOSBackupParser(self.backup.path)
                 content = parser.get_file_content(self.backup, backup_file)
@@ -1714,7 +1759,7 @@ class MainApplication(tk.Tk):
             if export_companions and companion_files:
                 for companion_bf, ext in companion_files:
                     if self.backup_type == 'android':
-                        companion_content = AndroidBackupParser.get_file_content(self.backup, companion_bf)
+                        companion_content = self._backup_parser.get_file_content(self.backup, companion_bf)
                     else:
                         parser = iOSBackupParser(self.backup.path)
                         companion_content = parser.get_file_content(self.backup, companion_bf)
