@@ -493,13 +493,30 @@ class iOSBackupParser:
             self._manifest_db_row_count = len(file_list)
 
             for file_info in file_list:
-                # file_info format: (backupFile, domain, name, relativePath)
-                if len(file_info) >= 4:
-                    file_id, domain, name, relative_path = file_info[:4]
+                # file_info is a dict with keys: backupFile, domain, fileID, relativePath, flags, file
+                if isinstance(file_info, dict):
+                    file_id = file_info.get('fileID', '') or file_info.get('backupFile', '')
+                    domain = file_info.get('domain', '')
+                    relative_path = file_info.get('relativePath', '')
+                    flags = file_info.get('flags', 0)
 
-                    # Try to get additional metadata
+                    # Parse the 'file' blob for metadata (NSKeyedArchiver plist)
                     file_size = 0
                     mode = 0
+                    modified_time = None
+                    file_blob = file_info.get('file')
+                    if file_blob:
+                        try:
+                            file_meta = plistlib.loads(file_blob)
+                            # Metadata is in $objects[1] (NSKeyedArchiver format)
+                            objects = file_meta.get('$objects', [])
+                            if len(objects) > 1 and isinstance(objects[1], dict):
+                                attrs = objects[1]
+                                file_size = attrs.get('Size', 0)
+                                mode = attrs.get('Mode', 0)
+                                modified_time = attrs.get('LastModified')
+                        except Exception:
+                            pass
 
                     files.append(BackupFile(
                         file_id=file_id or '',
@@ -507,7 +524,7 @@ class iOSBackupParser:
                         relative_path=relative_path or '',
                         file_size=file_size,
                         mode=mode,
-                        flags=0  # Not available from encrypted backup library
+                        flags=flags if isinstance(flags, int) else 0
                     ))
 
             return files, backup
