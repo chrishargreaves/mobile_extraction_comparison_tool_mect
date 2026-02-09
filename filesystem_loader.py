@@ -185,14 +185,21 @@ class FilesystemLoader:
         files = []
 
         try:
-            with tarfile.open(self.path, 'r:*') as tar:
-                # Get members iterator - more memory efficient than getmembers()
-                members = tar.getmembers()
-                total = len(members)
+            # Get file size for progress estimation
+            try:
+                tar_size = os.path.getsize(self.path)
+            except OSError:
+                tar_size = 0
 
-                for i, member in enumerate(members):
-                    if i % 1000 == 0:
-                        self._report_progress(i, total, f"Loading TAR: {i}/{total} entries")
+            self._report_progress(0, 100, f"Opening TAR archive ({tar_size // (1024*1024)} MB)...")
+
+            with tarfile.open(self.path, 'r:*') as tar:
+                # Stream members one at a time to avoid blocking on getmembers()
+                count = 0
+                while True:
+                    member = tar.next()
+                    if member is None:
+                        break
 
                     files.append(FilesystemFile(
                         path='/' + member.name.lstrip('./'),
@@ -200,8 +207,19 @@ class FilesystemLoader:
                         is_directory=member.isdir(),
                         modified_time=member.mtime
                     ))
+                    count += 1
 
-                self._report_progress(total, total, f"Loaded {total} entries")
+                    if count % 1000 == 0:
+                        if tar_size > 0:
+                            # Estimate progress from file position
+                            pos = tar.fileobj.tell() if hasattr(tar.fileobj, 'tell') else 0
+                            self._report_progress(pos, tar_size,
+                                f"Reading TAR: {count} entries ({pos * 100 // tar_size}%)")
+                        else:
+                            self._report_progress(count, count + 1000,
+                                f"Reading TAR: {count} entries")
+
+                self._report_progress(100, 100, f"Loaded {count} entries from TAR")
         except Exception as e:
             raise RuntimeError(f"Failed to load TAR archive: {e}")
 
@@ -213,7 +231,11 @@ class FilesystemLoader:
 
         try:
             with zipfile.ZipFile(self.path, 'r') as zf:
-                for info in zf.infolist():
+                members = zf.infolist()
+                total = len(members)
+                self._report_progress(0, total, f"Reading ZIP: 0/{total} entries")
+
+                for i, info in enumerate(members):
                     # Convert date_time tuple to timestamp
                     import time
                     try:
@@ -227,6 +249,11 @@ class FilesystemLoader:
                         is_directory=info.is_dir(),
                         modified_time=mtime
                     ))
+
+                    if i % 1000 == 0 and i > 0:
+                        self._report_progress(i, total, f"Reading ZIP: {i}/{total} entries")
+
+                self._report_progress(total, total, f"Loaded {total} entries from ZIP")
         except Exception as e:
             raise RuntimeError(f"Failed to load ZIP archive: {e}")
 
@@ -236,6 +263,9 @@ class FilesystemLoader:
         """Load file list from extracted directory."""
         files = []
         base_len = len(self.path)
+        count = 0
+
+        self._report_progress(0, 100, "Scanning directory...")
 
         try:
             for root, dirs, filenames in os.walk(self.path):
@@ -282,10 +312,85 @@ class FilesystemLoader:
                             is_directory=False
                         ))
 
+                count += len(dirs) + len(filenames)
+                if count % 1000 < len(dirs) + len(filenames):
+                    self._report_progress(count, count + 1000,
+                        f"Scanning directory: {count} entries")
+
+            self._report_progress(100, 100, f"Loaded {len(files)} entries from directory")
+
         except Exception as e:
             raise RuntimeError(f"Failed to load directory: {e}")
 
         return files
+
+    def _bulk_read_files(self, paths: set) -> dict:
+        """
+        Read multiple files from the acquisition in a single pass.
+
+        For TAR archives this avoids re-opening the archive for each file.
+
+        Args:
+            paths: Set of file paths to read (as stored in FilesystemFile.path)
+
+        Returns:
+            Dict mapping path -> bytes content
+        """
+        results = {}
+        # Build lookup set with normalized paths
+        needed = {}
+        for p in paths:
+            clean = p.lstrip('/')
+            needed[clean] = p
+            needed['./' + clean] = p
+
+        if self._format == 'tar':
+            try:
+                with tarfile.open(self.path, 'r:*') as tar:
+                    while True:
+                        member = tar.next()
+                        if member is None:
+                            break
+                        name = member.name.lstrip('./')
+                        orig_path = needed.get(name) or needed.get('./' + name)
+                        if orig_path and not member.isdir():
+                            try:
+                                f = tar.extractfile(member)
+                                if f:
+                                    results[orig_path] = f.read()
+                            except Exception:
+                                pass
+                            if len(results) == len(paths):
+                                break  # Found everything, stop early
+            except Exception:
+                pass
+
+        elif self._format == 'zip':
+            try:
+                with zipfile.ZipFile(self.path, 'r') as zf:
+                    for info in zf.infolist():
+                        name = info.filename.lstrip('./')
+                        orig_path = needed.get(name) or needed.get('./' + name)
+                        if orig_path:
+                            try:
+                                results[orig_path] = zf.read(info)
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+        elif self._format == 'directory':
+            for p in paths:
+                clean = p.lstrip('/')
+                full_path = os.path.join(self.path, clean)
+                if os.path.isfile(full_path):
+                    try:
+                        with open(full_path, 'rb') as fh:
+                            results[p] = fh.read()
+                    except Exception:
+                        pass
+
+        return results
 
     def _extract_container_mappings(self, acquisition: FilesystemAcquisition):
         """
@@ -346,16 +451,35 @@ class FilesystemLoader:
         ]
 
         total = len(metadata_files)
+        if total == 0:
+            return
 
-        # Process all metadata plist files with progress reporting
+        # Bulk-read all metadata plists in a single pass through the archive
+        self._report_progress(0, total, f"Reading {total} container metadata files...")
+        paths_needed = {f.path for f in metadata_files}
+
+        # Also include applicationState.db in the same pass
+        appstate_file = None
+        for f in acquisition.files:
+            if f.path.endswith('FrontBoard/applicationState.db'):
+                appstate_file = f
+                paths_needed.add(f.path)
+                break
+
+        file_contents = self._bulk_read_files(paths_needed)
+        self._report_progress(50, 100, f"Read {len(file_contents)} files, resolving containers...")
+
+        # Store the appstate content for later use
+        self._appstate_db_content = file_contents.get(appstate_file.path) if appstate_file else None
+
+        # Process all metadata plist files
         for i, f in enumerate(metadata_files):
-            if i % 10 == 0:
-                self._report_progress(i, total, f"Resolving containers: {i}/{total}")
+            self._report_progress(i, total, f"Resolving containers: {i}/{total}")
 
             container_type = get_container_type(f.path)
 
             try:
-                content = self._read_file_content(f.path)
+                content = file_contents.get(f.path)
                 if not content:
                     continue
 
@@ -386,8 +510,7 @@ class FilesystemLoader:
             except Exception:
                 continue
 
-        if total > 0:
-            self._report_progress(total, total, f"Resolved {total} containers")
+        self._report_progress(total, total, f"Resolved {total} containers")
 
     def _extract_mappings_from_applicationstate_db(self, acquisition: FilesystemAcquisition):
         """
@@ -398,25 +521,23 @@ class FilesystemLoader:
 
         Location: /private/var/mobile/Library/FrontBoard/applicationState.db
         """
-        # Find applicationState.db
-        db_paths = [
-            '/private/var/mobile/Library/FrontBoard/applicationState.db',
-            'private/var/mobile/Library/FrontBoard/applicationState.db',
-        ]
+        # Use content already read during bulk pass if available
+        db_content = getattr(self, '_appstate_db_content', None)
 
-        db_file = None
-        for f in acquisition.files:
-            if f.path.endswith('FrontBoard/applicationState.db'):
-                db_file = f
-                break
-
-        if not db_file:
-            return
-
-        # Read the database content
-        db_content = self._read_file_content(db_file.path)
         if not db_content:
-            return
+            # Fallback: find and read it individually
+            db_file = None
+            for f in acquisition.files:
+                if f.path.endswith('FrontBoard/applicationState.db'):
+                    db_file = f
+                    break
+
+            if not db_file:
+                return
+
+            db_content = self._read_file_content(db_file.path)
+            if not db_content:
+                return
 
         # Write to temp file for SQLite access
         with tempfile.NamedTemporaryFile(delete=False, suffix='.db') as tmp:

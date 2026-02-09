@@ -40,6 +40,78 @@ class PasswordDialog(simpledialog.Dialog):
         self.password = self.password_entry.get()
 
 
+class ProgressDialog(tk.Toplevel):
+    """Modal popup with progress bar and scrolling log for long-running operations."""
+
+    def __init__(self, parent, title="Loading..."):
+        super().__init__(parent)
+        self.title(title)
+        self.geometry("600x350")
+        self.resizable(True, True)
+        self.transient(parent)
+        self.grab_set()
+
+        # Phase label at top
+        self.phase_var = tk.StringVar(value="Starting...")
+        ttk.Label(self, textvariable=self.phase_var, font=("TkDefaultFont", 11, "bold")).pack(
+            anchor=tk.W, padx=10, pady=(10, 5)
+        )
+
+        # Progress bar
+        self.progress = ttk.Progressbar(self, mode='determinate', maximum=100)
+        self.progress.pack(fill=tk.X, padx=10, pady=(0, 5))
+
+        # Scrolling text log
+        log_frame = ttk.Frame(self)
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 5))
+
+        self.log_text = tk.Text(log_frame, height=12, state='disabled', wrap='word',
+                                font=("TkFixedFont", 10))
+        scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Close button (disabled until done)
+        self.close_btn = ttk.Button(self, text="Close", command=self.destroy, state='disabled')
+        self.close_btn.pack(pady=(0, 10))
+
+        # Prevent closing via window manager while loading
+        self.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        self.update()
+
+    def log(self, message):
+        """Append a message line to the log."""
+        self.log_text.configure(state='normal')
+        self.log_text.insert(tk.END, message + "\n")
+        self.log_text.see(tk.END)
+        self.log_text.configure(state='disabled')
+        self.update()
+
+    def update_progress(self, current, total, message):
+        """Update progress bar and append message to log."""
+        if total > 0:
+            self.progress.configure(maximum=total, value=current)
+        self.phase_var.set(message)
+        self.log(message)
+
+    def finish(self, summary):
+        """Mark operation complete."""
+        self.progress.configure(value=self.progress.cget('maximum'))
+        self.phase_var.set("Complete")
+        self.log(summary)
+        self.close_btn.configure(state='normal')
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+    def show_error(self, error_msg):
+        """Show error state."""
+        self.phase_var.set("Error")
+        self.log(f"ERROR: {error_msg}")
+        self.close_btn.configure(state='normal')
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+
 class StatusBar(ttk.Frame):
     """Status bar at bottom of window with optional progress bar."""
 
@@ -106,73 +178,70 @@ class StatisticsPanel(ttk.LabelFrame):
         self.placeholder.pack(pady=20)
 
     def update_statistics(self, stats: MappingStatistics, parsing_log=None):
-        """Update the statistics display."""
+        """Update the statistics display with a compact two-column layout."""
         self._parsing_log = parsing_log
 
         # Clear existing content
         for widget in self.stats_frame.winfo_children():
             widget.destroy()
 
-        # Summary section
-        summary_frame = ttk.LabelFrame(self.stats_frame, text="Summary", padding=5)
-        summary_frame.pack(fill=tk.X, padx=5, pady=5)
+        columns_frame = ttk.Frame(self.stats_frame)
+        columns_frame.pack(fill=tk.BOTH, expand=True)
 
-        row = 0
+        # --- Left column: Counts ---
+        left = ttk.Frame(columns_frame)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
 
-        # Build summary data with parsing log breakdown if available
-        summary_data = [
+        left_data = [
             ("Manifest.db Rows:", str(stats.manifest_db_row_count)),
         ]
-
-        # Add parsing log breakdown if available
         if parsing_log:
-            summary_data.extend([
-                ("  → Files:", str(parsing_log.files_added)),
-                ("  → Directories:", str(parsing_log.directories_added)),
-            ])
-            # Show size verification stats if we have actual sizes
+            left_data.append(("  Files / Dirs:", f"{parsing_log.files_added} / {parsing_log.directories_added}"))
             if parsing_log.size_mismatches > 0 or parsing_log.manifest_size_zero > 0:
-                summary_data.extend([
-                    ("  → Size mismatches:", str(parsing_log.size_mismatches)),
-                    ("  → Manifest size=0:", str(parsing_log.manifest_size_zero)),
-                ])
-
-        summary_data.extend([
+                left_data.append(("  Size issues:", f"{parsing_log.size_mismatches} mismatch, {parsing_log.manifest_size_zero} zero"))
+        left_data.extend([
             ("", ""),
-            ("Backup Files:", str(stats.total_backup_files)),
-            ("Backup Directories:", str(stats.total_backup_directories)),
-            ("Filesystem Files:", str(stats.total_filesystem_files)),
-            ("Filesystem Directories:", str(stats.total_filesystem_directories)),
-            ("", ""),
-            ("Successfully Mapped:", f"{stats.mapped_files} ({stats.mapped_files / max(1, stats.total_backup_files) * 100:.1f}%)"),
-            ("Not Found in FS:", f"{stats.not_found_files} ({stats.not_found_files / max(1, stats.total_backup_files) * 100:.1f}%)"),
-            ("Unmappable:", f"{stats.unmappable_files} ({stats.unmappable_files / max(1, stats.total_backup_files) * 100:.1f}%)"),
-            ("", ""),
-            ("Files only in Backup:", str(stats.backup_only_files)),
-            ("Files only in Filesystem:", str(stats.filesystem_only_files)),
-            ("", ""),
-            ("Backup Coverage of FS:", f"{stats.backup_coverage_percent:.1f}%"),
+            ("Backup:", f"{stats.total_backup_files} files, {stats.total_backup_directories} dirs"),
+            ("Filesystem:", f"{stats.total_filesystem_files} files, {stats.total_filesystem_directories} dirs"),
         ])
 
-        for label_text, value_text in summary_data:
+        self._fill_grid(left, left_data)
+
+        # --- Right column: Mapping results ---
+        right = ttk.Frame(columns_frame)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 0))
+
+        total = max(1, stats.total_backup_files)
+        right_data = [
+            ("Mapped:", f"{stats.mapped_files} ({stats.mapped_files / total * 100:.1f}%)"),
+            ("Not Found:", f"{stats.not_found_files} ({stats.not_found_files / total * 100:.1f}%)"),
+            ("Unmappable:", f"{stats.unmappable_files} ({stats.unmappable_files / total * 100:.1f}%)"),
+            ("", ""),
+            ("Backup only:", str(stats.backup_only_files)),
+            ("FS only:", str(stats.filesystem_only_files)),
+            ("Coverage:", f"{stats.backup_coverage_percent:.1f}%"),
+        ]
+
+        self._fill_grid(right, right_data)
+
+        # View Parsing Log button
+        if parsing_log:
+            ttk.Button(
+                self.stats_frame, text="View Parsing Log",
+                command=self._show_parsing_log
+            ).pack(anchor=tk.W, padx=5, pady=(5, 0))
+
+    @staticmethod
+    def _fill_grid(parent, data):
+        """Populate a frame with label/value rows."""
+        for row, (label_text, value_text) in enumerate(data):
             if label_text == "":
-                ttk.Separator(summary_frame, orient=tk.HORIZONTAL).grid(
-                    row=row, column=0, columnspan=2, sticky='ew', pady=3
+                ttk.Separator(parent, orient=tk.HORIZONTAL).grid(
+                    row=row, column=0, columnspan=2, sticky='ew', pady=2
                 )
             else:
-                ttk.Label(summary_frame, text=label_text).grid(row=row, column=0, sticky='w', padx=5)
-                ttk.Label(summary_frame, text=value_text).grid(row=row, column=1, sticky='e', padx=5)
-            row += 1
-
-        # Add button to view parsing log
-        if parsing_log:
-            btn_frame = ttk.Frame(self.stats_frame)
-            btn_frame.pack(fill=tk.X, padx=5, pady=10)
-            ttk.Button(
-                btn_frame,
-                text="View Parsing Log",
-                command=self._show_parsing_log
-            ).pack(side=tk.LEFT)
+                ttk.Label(parent, text=label_text).grid(row=row, column=0, sticky='w', padx=(2, 5))
+                ttk.Label(parent, text=value_text).grid(row=row, column=1, sticky='e', padx=(0, 2))
 
     def _show_parsing_log(self):
         """Show the parsing log in a new window."""
@@ -1146,31 +1215,38 @@ class MainApplication(tk.Tk):
         self.status_bar.show_progress(100)
         self.update_idletasks()
 
+        dialog = ProgressDialog(self, title="Loading Filesystem")
+        dialog.log(f"Source: {path}")
+
         def progress_callback(current, total, message):
             self.status_bar.set_status(message)
             if total > 0:
                 self.status_bar.set_progress(current, total)
-            self.update_idletasks()
+            dialog.update_progress(current, total, message)
 
         try:
             loader = FilesystemLoader(path, progress_callback=progress_callback)
+            dialog.log(f"Detected format: {loader._format}")
             self.filesystem = loader.load()
 
+            file_count = len([f for f in self.filesystem.files if not f.is_directory])
+            dir_count = len(self.filesystem.files) - file_count
+            dialog.log(f"Found {file_count} files and {dir_count} directories")
+            dialog.log(f"Platform detected: {self.filesystem.platform}")
+
+            dialog.update_progress(0, 100, "Building file tree...")
             self.status_bar.set_status("Building file tree...")
             self.status_bar.set_progress(0, 100)
-            self.update_idletasks()
             self.fs_tree.load_filesystem(self.filesystem)
 
-            file_count = len([f for f in self.filesystem.files if not f.is_directory])
-            self.status_bar.hide_progress()
-            self.status_bar.set_status(f"Loaded filesystem: {file_count} files")
-
-            # Show container mapping info if found
+            # Build summary
+            summary = f"Loaded filesystem: {file_count} files"
             if self.filesystem.app_container_mapping:
-                self.status_bar.set_status(
-                    f"Loaded filesystem: {file_count} files, "
-                    f"{len(self.filesystem.app_container_mapping)} app containers resolved"
-                )
+                summary += f", {len(self.filesystem.app_container_mapping)} app containers resolved"
+
+            self.status_bar.hide_progress()
+            self.status_bar.set_status(summary)
+            dialog.finish(summary)
 
             # Run mapping if backup is also loaded
             if self.backup:
@@ -1178,8 +1254,8 @@ class MainApplication(tk.Tk):
 
         except Exception as e:
             self.status_bar.hide_progress()
-            messagebox.showerror("Error", f"Failed to load filesystem: {e}")
             self.status_bar.set_status("Failed to load filesystem")
+            dialog.show_error(str(e))
 
     def _run_mapping(self):
         """Run the path mapping between backup and filesystem."""
