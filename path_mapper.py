@@ -77,6 +77,8 @@ class PathMapper:
         'AppDomainPlugin': '/private/var/mobile/Containers/Data/PluginKitPlugin',
         'SysContainerDomain': '/private/var/containers/Data/System',
         'SysSharedContainerDomain': '/private/var/containers/Shared/SystemGroup',
+        # Magnet Acquire Quick Image: AFC-captured files from /private/var/mobile/Media/
+        'Filesystem': '/private/var/mobile/Media',
     }
 
     def __init__(self, backup: iOSBackup, filesystem: FilesystemAcquisition):

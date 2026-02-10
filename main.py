@@ -306,6 +306,7 @@ class BackupTreeView(ttk.Frame):
 
         self.tree = ttk.Treeview(tree_frame, selectmode='browse')
         self.tree.heading('#0', text='Backup Files', anchor='w')
+        self.tree.tag_configure('separator', foreground='gray')
 
         vsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
         hsb = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
@@ -403,6 +404,67 @@ class BackupTreeView(ttk.Frame):
         """Set the list of unmapped files for filtering."""
         self._unmapped_files = set(id(bf) for bf in unmapped_files)
 
+    # File ID prefixes that indicate extra (non-core-backup) sources
+    _EXTRA_PREFIXES = ('magnet_fs:', 'sdcard_tar:', 'zip:')
+
+    # Map file_id prefix to human-readable source label
+    _SOURCE_LABELS = {
+        'sdcard_tar:': 'sdcard.tar.gz',
+        'magnet_fs:': 'AFC capture',
+        'zip:': 'zip',
+    }
+
+    def _is_extra_source(self, bf) -> bool:
+        """Check if a backup file comes from an additional source (not the core backup)."""
+        return bf.file_id.startswith(self._EXTRA_PREFIXES)
+
+    def _source_suffix(self, domain_files: list) -> str:
+        """Derive a source label suffix from extra files' file_id prefixes."""
+        labels = set()
+        for bf in domain_files:
+            for prefix, label in self._SOURCE_LABELS.items():
+                if bf.file_id.startswith(prefix):
+                    labels.add(label)
+                    break
+        if len(labels) == 1:
+            return f" [{labels.pop()}]"
+        elif labels:
+            return f" [{', '.join(sorted(labels))}]"
+        return ""
+
+    def _build_domain_nodes(self, domain_files_map: Dict[str, list], filter_lower: str,
+                            annotate_source: bool = False):
+        """Build domain nodes with directory structure for a group of files."""
+        for domain in sorted(domain_files_map.keys()):
+            domain_files = domain_files_map[domain]
+
+            # Create domain node label
+            suffix = self._source_suffix(domain_files) if annotate_source else ""
+            label = f"{domain}{suffix} ({len(domain_files)} files)"
+            domain_node = self.tree.insert('', 'end', text=label, open=bool(filter_lower))
+
+            # Build directory structure within domain
+            dir_tree: Dict[str, str] = {}  # path -> node_id
+
+            for bf in sorted(domain_files, key=lambda f: f.relative_path):
+                path_parts = bf.relative_path.split('/') if bf.relative_path else []
+
+                # Create intermediate directories
+                current_path = ""
+                parent_node = domain_node
+
+                for i, part in enumerate(path_parts[:-1]):
+                    current_path = f"{current_path}/{part}" if current_path else part
+                    if current_path not in dir_tree:
+                        dir_node = self.tree.insert(parent_node, 'end', text=part + "/", open=bool(filter_lower))
+                        dir_tree[current_path] = dir_node
+                    parent_node = dir_tree[current_path]
+
+                # Add file node
+                filename = path_parts[-1] if path_parts else bf.relative_path or "(root)"
+                file_node = self.tree.insert(parent_node, 'end', text=filename)
+                self.file_nodes[file_node] = bf
+
     def _build_tree(self, files: List[BackupFile], filter_text: str = ""):
         """Build or rebuild the tree, optionally filtered."""
         self.file_nodes.clear()
@@ -430,43 +492,25 @@ class BackupTreeView(ttk.Frame):
                 continue
             filtered_files.append(bf)
 
-        # Group by domain
-        files_by_domain: Dict[str, List[BackupFile]] = {}
+        # Split into standard backup files and extra sources
+        standard_by_domain: Dict[str, list] = {}
+        extra_by_domain: Dict[str, list] = {}
+
         for bf in filtered_files:
-            if bf.domain not in files_by_domain:
-                files_by_domain[bf.domain] = []
-            files_by_domain[bf.domain].append(bf)
+            target = extra_by_domain if self._is_extra_source(bf) else standard_by_domain
+            if bf.domain not in target:
+                target[bf.domain] = []
+            target[bf.domain].append(bf)
 
-        # Sort domains
-        sorted_domains = sorted(files_by_domain.keys())
+        # When extras exist, add section headers to both groups
+        if extra_by_domain:
+            self.tree.insert('', 'end', text='\u2500\u2500 Backup Content \u2500\u2500', tags=('separator',))
 
-        for domain in sorted_domains:
-            domain_files = files_by_domain[domain]
+        self._build_domain_nodes(standard_by_domain, filter_lower)
 
-            # Create domain node
-            domain_node = self.tree.insert('', 'end', text=f"{domain} ({len(domain_files)} files)", open=bool(filter_lower))
-
-            # Build directory structure within domain
-            dir_tree: Dict[str, str] = {}  # path -> node_id
-
-            for bf in sorted(domain_files, key=lambda f: f.relative_path):
-                path_parts = bf.relative_path.split('/') if bf.relative_path else []
-
-                # Create intermediate directories
-                current_path = ""
-                parent_node = domain_node
-
-                for i, part in enumerate(path_parts[:-1]):
-                    current_path = f"{current_path}/{part}" if current_path else part
-                    if current_path not in dir_tree:
-                        dir_node = self.tree.insert(parent_node, 'end', text=part + "/", open=bool(filter_lower))
-                        dir_tree[current_path] = dir_node
-                    parent_node = dir_tree[current_path]
-
-                # Add file node
-                filename = path_parts[-1] if path_parts else bf.relative_path or "(root)"
-                file_node = self.tree.insert(parent_node, 'end', text=filename)
-                self.file_nodes[file_node] = bf
+        if extra_by_domain:
+            self.tree.insert('', 'end', text='\u2500\u2500 Additional Sources \u2500\u2500', tags=('separator',))
+            self._build_domain_nodes(extra_by_domain, filter_lower, annotate_source=True)
 
         # Update filter count
         if filter_lower:

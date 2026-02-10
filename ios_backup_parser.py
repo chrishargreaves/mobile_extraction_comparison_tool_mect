@@ -629,6 +629,10 @@ class iOSBackupParser:
             # Read actual file sizes from disk
             self._get_actual_file_sizes(files, progress_callback)
 
+            # Augment with Magnet Quick Image extras (Filesystem/, Live Data/)
+            if self._is_zipped and self._zip_file:
+                files = self._augment_magnet_extras(files, progress_callback)
+
             if progress_callback:
                 progress_callback(100, 100, "Backup parsing complete")
 
@@ -653,6 +657,95 @@ class iOSBackupParser:
             self._close_zip()
             raise
 
+    def _augment_magnet_extras(self, files: List[BackupFile],
+                               progress_callback=None) -> List[BackupFile]:
+        """Add Filesystem/ entries from Magnet Quick Image ZIP, skip Live Data/.
+
+        Magnet Acquire iOS Quick Images contain:
+        - Standard iOS backup (Manifest.db + SHA1 files) — already parsed
+        - Filesystem/ — AFC-captured files from /private/var/mobile/Media/
+        - Live Data/ — device_properties.txt (not mappable)
+
+        Filesystem/ entries are added under their own 'Filesystem' domain so
+        they appear as a distinct section in the tree view.  The path mapper
+        maps Filesystem/<path> → /private/var/mobile/Media/<path>.
+        """
+        namelist = self._zip_file.namelist()
+        fs_entries = [n for n in namelist if n.startswith('Filesystem/')]
+        live_entries = [n for n in namelist if n.startswith('Live Data/')]
+
+        if not fs_entries and not live_entries:
+            return files  # Not a Magnet Quick Image — nothing to add
+
+        # Track existing domain paths to avoid duplicates
+        seen = {bf.full_domain_path for bf in files}
+        added = 0
+
+        if progress_callback:
+            progress_callback(92, 100, f"Processing Magnet Filesystem ({len(fs_entries)} entries)...")
+
+        for name in fs_entries:
+            rel = name[len('Filesystem/'):]
+            if not rel:
+                continue
+
+            is_dir = name.endswith('/')
+            info = self._zip_file.getinfo(name)
+
+            # Use own domain so Filesystem entries appear separately in tree
+            domain = 'Filesystem'
+            relative_path = rel.rstrip('/')
+            domain_path = f'{domain}/{relative_path}'
+
+            if domain_path in seen:
+                continue
+
+            file_id = f'magnet_fs:{name}'
+            bf = BackupFile(
+                file_id=file_id,
+                domain=domain,
+                relative_path=relative_path,
+                file_size=0 if is_dir else info.file_size,
+                mode=0o040755 if is_dir else 0o100644,
+                flags=2 if is_dir else 1,
+                actual_file_size=info.file_size if not is_dir else None,
+            )
+            files.append(bf)
+            seen.add(domain_path)
+            added += 1
+
+            self._parsing_log.add_entry(
+                file_id=file_id, domain=domain, relative_path=relative_path,
+                status='added_directory' if is_dir else 'added_file',
+                details="from Magnet Filesystem/ (AFC capture)",
+                manifest_size=info.file_size if not is_dir else 0,
+            )
+
+        if added:
+            self._parsing_log.total_rows += added
+            self._manifest_db_row_count += added
+
+        # Log Live Data/ as skipped
+        if live_entries:
+            for name in live_entries:
+                rel = name[len('Live Data/'):]
+                if rel:
+                    self._parsing_log.add_entry(
+                        file_id=f'magnet_live:{name}',
+                        domain='Live Data',
+                        relative_path=rel,
+                        status='skipped_no_content',
+                        details="Magnet Live Data (not mappable, skipped)",
+                    )
+
+        if progress_callback:
+            msg = f"Added {added} Magnet Filesystem entries"
+            if live_entries:
+                msg += f", skipped {len([n for n in live_entries if not n.endswith('Live Data/')])} Live Data entries"
+            progress_callback(95, 100, msg)
+
+        return files
+
     def get_file_content(self, backup: iOSBackup, backup_file: BackupFile) -> Optional[bytes]:
         """
         Get the content of a file from the backup.
@@ -665,6 +758,23 @@ class iOSBackupParser:
             File contents as bytes, or None if unable to read
         """
         if backup_file.is_directory:
+            return None
+
+        # Handle Magnet Filesystem/ entries (stored directly in ZIP)
+        if backup_file.file_id.startswith('magnet_fs:'):
+            zip_entry = backup_file.file_id[len('magnet_fs:'):]
+            if backup._zip_handle:
+                try:
+                    return backup._zip_handle.read(zip_entry)
+                except KeyError:
+                    return None
+            # Re-open ZIP if handle not available
+            if backup.is_zipped:
+                try:
+                    with zipfile.ZipFile(backup.path, 'r') as zf:
+                        return zf.read(zip_entry)
+                except Exception:
+                    return None
             return None
 
         if backup.is_encrypted and backup._backup_handle:

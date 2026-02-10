@@ -153,6 +153,13 @@ class TestMapDomainPath:
         path, notes = mapper._map_domain_path(bf)
         assert path == "/private/var/containers/Shared/SystemGroup/GGGG-HHHH/Library/pref.plist"
 
+    def test_filesystem_domain(self):
+        """Magnet Filesystem domain maps to /private/var/mobile/Media/."""
+        bf = _ios_file("Filesystem", "DCIM/100APPLE/IMG_0001.JPG")
+        mapper = _make_ios_mapper([bf])
+        path, notes = mapper._map_domain_path(bf)
+        assert path == "/private/var/mobile/Media/DCIM/100APPLE/IMG_0001.JPG"
+
     def test_unknown_domain(self):
         bf = _ios_file("UnknownDomain", "file.txt")
         mapper = _make_ios_mapper([bf])
