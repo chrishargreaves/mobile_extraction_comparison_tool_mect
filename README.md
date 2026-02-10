@@ -1,11 +1,15 @@
+⚠️ **Note this is an AI generated application.** - see credits and disclaimer below.
+
 # MECT — Mobile Extraction Comparison Tool
 
 A tool for comparing mobile device backups against filesystem acquisitions. 
 
 Provides both a Tkinter GUI and a command-line interface.
 
+<img width="1140" height="720" alt="image" src="https://github.com/user-attachments/assets/8df13850-baa8-4259-9ef3-fc91ba53da67" />
+
+
 # Credits and Disclaimer
-Note this is an AI generated application.
 
 - software conceptualization, design and architecture - Chris Hargreaves
 - code - Claude Opus 4.5/4.6
