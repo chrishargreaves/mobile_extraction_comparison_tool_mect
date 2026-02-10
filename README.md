@@ -24,7 +24,8 @@ Provides both a Tkinter GUI and a command-line interface.
 | iOS backup directory | Folder containing `Manifest.db` (standard iTunes/Finder backup) |
 | iOS backup ZIP | Zipped iTunes backup |
 | Android `.ab` file | AES-256 encrypted or unencrypted Android backup |
-| Magnet Acquire Quick Image | ZIP containing `adb-data.tar` (or directory containing such a ZIP) |
+| Magnet Acquire Quick Image (Android) | ZIP containing `adb-data.tar` (or directory containing such a ZIP) |
+| Magnet Acquire Quick Image (iOS) | ZIP containing `Manifest.db` plus optional `Filesystem/` and `Live Data/` folders |
 
 **Filesystem acquisitions (right pane / second argument):**
 
