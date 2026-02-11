@@ -35,6 +35,8 @@ from android_backup_parser import AndroidBackupParser
 from filesystem_loader import FilesystemLoader
 from path_mapper import PathMapper, MappingStatus
 from android_path_mapper import AndroidPathMapper
+from filesystem_mapper import FilesystemMapper, FilesystemAsBackup
+from alex_parser import ALEXParser
 
 
 def print_progress(current: int, total: int, message: str):
@@ -63,11 +65,27 @@ def load_backup(backup_path: str, password: Optional[str] = None):
         print(f"  Device: {backup.device_name}", file=sys.stderr)
         if backup.android_version:
             print(f"  Android: {backup.android_version}", file=sys.stderr)
+    elif ALEXParser.is_alex_extraction(backup_path):
+        parser = ALEXParser(backup_path, password=password)
+        backup = parser.parse(progress_callback=print_progress)
+        print(f"\n  Type: ALEX UFED-style extraction", file=sys.stderr)
+        print(f"  Device: {backup.device_name}", file=sys.stderr)
+        if backup.android_version:
+            print(f"  Android: {backup.android_version}", file=sys.stderr)
     else:
-        raise ValueError(
-            f"Not a recognized backup format: {backup_path}\n"
-            "Supported: iOS backup (directory/ZIP) or Android backup (.ab)"
-        )
+        # Try as plain filesystem archive
+        try:
+            loader = FilesystemLoader(backup_path, progress_callback=print_progress)
+            acquisition = loader.load()
+            backup = FilesystemAsBackup(acquisition)
+            print(f"\n  Type: Filesystem archive ({acquisition.format})", file=sys.stderr)
+            print(f"  Platform: {acquisition.platform}", file=sys.stderr)
+        except Exception:
+            raise ValueError(
+                f"Not a recognized backup format: {backup_path}\n"
+                "Supported: iOS backup (directory/ZIP), Android backup (.ab), "
+                "or plain archive (ZIP, TAR, TAR.GZ, directory)"
+            )
 
     print(f"  Encrypted: {backup.is_encrypted}", file=sys.stderr)
     print(f"  Files: {len(backup.files)}", file=sys.stderr)
@@ -93,7 +111,9 @@ def run_comparison(backup, filesystem):
     """Run the path mapping comparison."""
     print("\nMapping paths...", file=sys.stderr)
 
-    if hasattr(backup, 'backup_type') and backup.backup_type == 'android':
+    if hasattr(backup, 'backup_type') and backup.backup_type == 'filesystem':
+        mapper = FilesystemMapper(backup, filesystem)
+    elif hasattr(backup, 'backup_type') and backup.backup_type == 'android':
         mapper = AndroidPathMapper(backup, filesystem)
     else:
         mapper = PathMapper(backup, filesystem)
@@ -382,7 +402,7 @@ Examples:
         """
     )
 
-    parser.add_argument("backup_path", help="Path to backup (iOS directory/ZIP or Android .ab)")
+    parser.add_argument("backup_path", help="Path to backup (iOS directory/ZIP, Android .ab, or plain archive/directory)")
     parser.add_argument("filesystem_path", help="Path to filesystem acquisition (TAR, ZIP, or directory)")
     parser.add_argument("-o", "--output",
                         choices=["stats", "detailed", "domains", "json", "csv-unmapped", "csv-fs-only", "csv-all"],

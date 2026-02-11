@@ -22,6 +22,39 @@ from magnet_parser import MagnetQuickImageParser
 from filesystem_loader import FilesystemLoader, FilesystemAcquisition, FilesystemFile
 from path_mapper import PathMapper, PathMapping, MappingStatus, MappingStatistics
 from android_path_mapper import AndroidPathMapper
+from filesystem_mapper import FilesystemMapper, FilesystemAsBackup
+from alex_parser import ALEXParser
+
+
+class ToolTip:
+    """Lightweight tooltip for tkinter widgets."""
+
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip_window = None
+        widget.bind("<Enter>", self._show)
+        widget.bind("<Leave>", self._hide)
+
+    def _show(self, event=None):
+        if self.tip_window:
+            return
+        x = self.widget.winfo_rootx() + 20
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
+        self.tip_window = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(
+            tw, text=self.text, justify=tk.LEFT,
+            background="#ffffe0", relief=tk.SOLID, borderwidth=1,
+            font=("TkDefaultFont", 10, "normal"), wraplength=300,
+        )
+        label.pack()
+
+    def _hide(self, event=None):
+        if self.tip_window:
+            self.tip_window.destroy()
+            self.tip_window = None
 
 
 class PasswordDialog(simpledialog.Dialog):
@@ -214,13 +247,19 @@ class StatisticsPanel(ttk.LabelFrame):
 
         total = max(1, stats.total_backup_files)
         right_data = [
-            ("Mapped:", f"{stats.mapped_files} ({stats.mapped_files / total * 100:.1f}%)"),
-            ("Not Found:", f"{stats.not_found_files} ({stats.not_found_files / total * 100:.1f}%)"),
-            ("Unmappable:", f"{stats.unmappable_files} ({stats.unmappable_files / total * 100:.1f}%)"),
+            ("Mapped:", f"{stats.mapped_files} ({stats.mapped_files / total * 100:.1f}%)",
+             "Backup files successfully matched to a file in the filesystem acquisition."),
+            ("Not Found:", f"{stats.not_found_files} ({stats.not_found_files / total * 100:.1f}%)",
+             "Backup files whose path could be resolved, but the file was not present in the filesystem acquisition."),
+            ("Unmappable:", f"{stats.unmappable_files} ({stats.unmappable_files / total * 100:.1f}%)",
+             "Backup files with an unknown domain or token, so no filesystem path could be determined."),
             ("", ""),
-            ("Backup only:", str(stats.backup_only_files)),
-            ("FS only:", str(stats.filesystem_only_files)),
-            ("Coverage:", f"{stats.backup_coverage_percent:.1f}%"),
+            ("Backup only:", str(stats.backup_only_files),
+             "Total backup files with no filesystem match (Not Found + Unmappable)."),
+            ("FS only:", str(stats.filesystem_only_files),
+             "Filesystem files that have no corresponding backup file."),
+            ("Coverage:", f"{stats.backup_coverage_percent:.1f}%",
+             "Percentage of filesystem files that are represented in the backup (Mapped / Total Filesystem Files)."),
         ]
 
         self._fill_grid(right, right_data)
@@ -234,15 +273,24 @@ class StatisticsPanel(ttk.LabelFrame):
 
     @staticmethod
     def _fill_grid(parent, data):
-        """Populate a frame with label/value rows."""
-        for row, (label_text, value_text) in enumerate(data):
+        """Populate a frame with label/value rows. Each item is (label, value) or (label, value, tooltip)."""
+        for row, item in enumerate(data):
+            label_text = item[0]
+            value_text = item[1]
+            tooltip_text = item[2] if len(item) > 2 else None
+
             if label_text == "":
                 ttk.Separator(parent, orient=tk.HORIZONTAL).grid(
                     row=row, column=0, columnspan=2, sticky='ew', pady=2
                 )
             else:
-                ttk.Label(parent, text=label_text).grid(row=row, column=0, sticky='w', padx=(2, 5))
-                ttk.Label(parent, text=value_text).grid(row=row, column=1, sticky='e', padx=(0, 2))
+                lbl = ttk.Label(parent, text=label_text)
+                lbl.grid(row=row, column=0, sticky='w', padx=(2, 5))
+                val = ttk.Label(parent, text=value_text)
+                val.grid(row=row, column=1, sticky='e', padx=(0, 2))
+                if tooltip_text:
+                    ToolTip(lbl, tooltip_text)
+                    ToolTip(val, tooltip_text)
 
     def _show_parsing_log(self):
         """Show the parsing log in a new window."""
@@ -370,21 +418,27 @@ class BackupTreeView(ttk.Frame):
             self.tree.delete(item)
 
         # Update header based on backup type
-        if hasattr(backup, 'backup_type') and backup.backup_type == 'android':
+        bt = getattr(backup, 'backup_type', None)
+        if bt == 'filesystem':
+            platform = getattr(backup, 'platform', 'unknown')
+            self.header_var.set(f"Source Archive ({platform})")
+        elif bt == 'android':
             self.header_var.set("Android Backup")
         else:
             self.header_var.set("iOS Backup")
 
         # Update info label
-        if hasattr(backup, 'backup_type') and backup.backup_type == 'android':
+        if bt == 'filesystem':
+            info_text = f"{backup.device_name or 'Archive'}"
+        elif bt == 'android':
             info_text = f"{backup.device_name or 'Android Device'}"
             if backup.android_version:
                 info_text += f" ({backup.android_version})"
         else:
             info_text = f"{backup.device_name or 'Unknown Device'}"
-        if backup.ios_version:
+        if getattr(backup, 'ios_version', None):
             info_text += f" (iOS {backup.ios_version})"
-        if backup.is_encrypted:
+        if getattr(backup, 'is_encrypted', False):
             info_text += " [Encrypted]"
         self.info_var.set(info_text)
 
@@ -958,11 +1012,12 @@ class MainApplication(tk.Tk):
         self.geometry("1400x900")
 
         # Data
-        self.backup = None  # iOSBackup or AndroidBackup
-        self.backup_type: Optional[str] = None  # 'ios' or 'android'
+        self.backup = None  # iOSBackup, AndroidBackup, or FilesystemAsBackup
+        self.backup_type: Optional[str] = None  # 'ios', 'android', or 'filesystem'
         self._backup_parser = None  # Store parser for content extraction (Android)
+        self._backup_acquisition = None  # Store acquisition for filesystem backup type
         self.filesystem: Optional[FilesystemAcquisition] = None
-        self.mapper = None  # PathMapper or AndroidPathMapper
+        self.mapper = None  # PathMapper, AndroidPathMapper, or FilesystemMapper
         self._selecting: bool = False  # Flag to prevent recursive selection
 
         self._create_menu()
@@ -1093,13 +1148,14 @@ class MainApplication(tk.Tk):
             self._load_backup_from_path(path)
 
     def _load_backup_file(self):
-        """Load a backup from a file (iOS ZIP or Android .ab)."""
+        """Load a backup from a file (iOS ZIP, Android .ab, or plain archive)."""
         path = filedialog.askopenfilename(
             title="Select Backup File",
             filetypes=[
-                ("Backup files", "*.zip *.ab"),
+                ("Supported files", "*.zip *.ab *.tar *.tar.gz *.tgz"),
                 ("ZIP files", "*.zip"),
                 ("Android backups", "*.ab"),
+                ("TAR files", "*.tar *.tar.gz *.tgz"),
                 ("All files", "*.*")
             ]
         )
@@ -1107,7 +1163,7 @@ class MainApplication(tk.Tk):
             self._load_backup_from_path(path)
 
     def _load_backup_from_path(self, path: str):
-        """Load a backup from the given path (auto-detects iOS vs Android vs Magnet)."""
+        """Load a backup from the given path (auto-detects iOS vs Android vs Magnet vs filesystem)."""
         if iOSBackupParser.is_ios_backup(path):
             self.backup_type = 'ios'
             self._load_ios_backup(path)
@@ -1117,15 +1173,25 @@ class MainApplication(tk.Tk):
         elif MagnetQuickImageParser.is_magnet_quick_image(path):
             self.backup_type = 'android'
             self._load_magnet_backup(path)
+        elif ALEXParser.is_alex_extraction(path):
+            self.backup_type = 'android'
+            self._load_alex_backup(path)
         else:
-            messagebox.showerror(
-                "Error",
-                "Selected path is not a recognized backup format.\n\n"
-                "Supported formats:\n"
-                "- iOS backup (directory with Manifest.db or ZIP)\n"
-                "- Android backup (.ab file)\n"
-                "- Magnet Acquire Quick Image (ZIP or directory)"
-            )
+            # Try as plain filesystem archive (plain ZIP, TAR, etc.)
+            try:
+                self.backup_type = 'filesystem'
+                self._load_filesystem_as_backup(path)
+            except Exception:
+                messagebox.showerror(
+                    "Error",
+                    "Selected path is not a recognized format.\n\n"
+                    "Supported formats:\n"
+                    "- iOS backup (directory with Manifest.db or ZIP)\n"
+                    "- Android backup (.ab file)\n"
+                    "- Magnet Acquire Quick Image (ZIP or directory)\n"
+                    "- ALEX UFED-style extraction (ZIP or directory)\n"
+                    "- Plain archive (ZIP, TAR, TAR.GZ) or directory"
+                )
 
     def _load_android_backup(self, path: str):
         """Load an Android backup from the given path."""
@@ -1213,6 +1279,97 @@ class MainApplication(tk.Tk):
             self.status_bar.hide_progress()
             messagebox.showerror("Error", f"Failed to load Magnet Quick Image: {e}")
             self.status_bar.set_status("Failed to load backup")
+
+    def _load_alex_backup(self, path: str):
+        """Load an ALEX UFED-style extraction from the given path."""
+        self.status_bar.set_status(f"Loading ALEX extraction from {path}...")
+        self.status_bar.progress.configure(mode='determinate')
+        self.status_bar.show_progress()
+        self.status_bar.progress['value'] = 0
+        self.update_idletasks()
+
+        try:
+            parser = ALEXParser(path, password=None)
+
+            def password_callback():
+                dialog = PasswordDialog(self, "Enter Backup Password")
+                return dialog.password
+
+            def progress_callback(current, total, message):
+                if total > 0:
+                    self.status_bar.progress['value'] = current
+                self.status_bar.set_status(message)
+                self.update_idletasks()
+
+            self.backup = parser.parse(
+                password_callback=password_callback,
+                progress_callback=progress_callback
+            )
+            self._backup_parser = parser
+
+            self.status_bar.set_status("Building backup tree...")
+            self.status_bar.progress['value'] = 95
+            self.update_idletasks()
+
+            self.backup_tree.load_backup(self.backup)
+
+            file_count = len([f for f in self.backup.files if not f.is_directory])
+            self.status_bar.progress['value'] = 100
+            self.status_bar.hide_progress()
+            self.status_bar.set_status(f"Loaded ALEX extraction: {file_count} files")
+
+            if self.filesystem:
+                self._run_mapping()
+
+        except Exception as e:
+            self.status_bar.progress.configure(mode='determinate')
+            self.status_bar.hide_progress()
+            messagebox.showerror("Error", f"Failed to load ALEX extraction: {e}")
+            self.status_bar.set_status("Failed to load backup")
+
+    def _load_filesystem_as_backup(self, path: str):
+        """Load a plain archive or directory as a backup source for comparison."""
+        self.status_bar.set_status(f"Loading archive as source from {path}...")
+        self.status_bar.show_progress(100)
+        self.update_idletasks()
+
+        dialog = ProgressDialog(self, title="Loading Source Archive")
+        dialog.log(f"Source: {path}")
+
+        def progress_callback(current, total, message):
+            self.status_bar.set_status(message)
+            if total > 0:
+                self.status_bar.set_progress(current, total)
+            dialog.update_progress(current, total, message)
+
+        try:
+            loader = FilesystemLoader(path, progress_callback=progress_callback)
+            dialog.log(f"Detected format: {loader._format}")
+            acquisition = loader.load()
+
+            dialog.log(f"Platform detected: {acquisition.platform}")
+
+            self.backup = FilesystemAsBackup(acquisition)
+            self._backup_parser = None
+            self._backup_acquisition = acquisition
+
+            self.status_bar.set_status("Building source tree...")
+            self.backup_tree.load_backup(self.backup)
+
+            file_count = len([f for f in self.backup.files if not f.is_directory])
+            self.status_bar.hide_progress()
+            summary = f"Loaded source archive: {file_count} files ({acquisition.platform})"
+            self.status_bar.set_status(summary)
+            dialog.finish(summary)
+
+            if self.filesystem:
+                self._run_mapping()
+
+        except Exception as e:
+            self.status_bar.hide_progress()
+            self.status_bar.set_status("Failed to load source archive")
+            dialog.show_error(str(e))
+            raise  # Re-raise so _load_backup_from_path's except catches it
 
     def _load_ios_backup(self, path: str):
         """Load an iOS backup from the given path."""
@@ -1359,7 +1516,9 @@ class MainApplication(tk.Tk):
         self.update_idletasks()
 
         try:
-            if self.backup_type == 'android':
+            if self.backup_type == 'filesystem':
+                self.mapper = FilesystemMapper(self.backup, self.filesystem)
+            elif self.backup_type == 'android':
                 self.mapper = AndroidPathMapper(self.backup, self.filesystem)
             else:
                 self.mapper = PathMapper(self.backup, self.filesystem)
@@ -1694,7 +1853,12 @@ class MainApplication(tk.Tk):
 
         try:
             # Get backup file content
-            if self.backup_type == 'android':
+            if self.backup_type == 'filesystem':
+                loader = FilesystemLoader(self.backup._acquisition.path)
+                backup_content = loader.get_file_content(
+                    self.backup._acquisition, mapping.backup_file._fs_file
+                )
+            elif self.backup_type == 'android':
                 backup_content = self._backup_parser.get_file_content(self.backup, mapping.backup_file)
             else:
                 parser = iOSBackupParser(self.backup.path)
@@ -1784,7 +1948,12 @@ class MainApplication(tk.Tk):
 
         try:
             # Extract main file
-            if self.backup_type == 'android':
+            if self.backup_type == 'filesystem':
+                loader = FilesystemLoader(self.backup._acquisition.path)
+                content = loader.get_file_content(
+                    self.backup._acquisition, backup_file._fs_file
+                )
+            elif self.backup_type == 'android':
                 content = self._backup_parser.get_file_content(self.backup, backup_file)
             else:
                 parser = iOSBackupParser(self.backup.path)
@@ -1802,7 +1971,12 @@ class MainApplication(tk.Tk):
             # Extract companion files if requested
             if export_companions and companion_files:
                 for companion_bf, ext in companion_files:
-                    if self.backup_type == 'android':
+                    if self.backup_type == 'filesystem':
+                        loader = FilesystemLoader(self.backup._acquisition.path)
+                        companion_content = loader.get_file_content(
+                            self.backup._acquisition, companion_bf._fs_file
+                        )
+                    elif self.backup_type == 'android':
                         companion_content = self._backup_parser.get_file_content(self.backup, companion_bf)
                     else:
                         parser = iOSBackupParser(self.backup.path)

@@ -336,3 +336,88 @@ class TestMappingsByDomain:
         fs_only = mapper.get_filesystem_files_not_in_backup()
         assert len(fs_only) == 1
         assert fs_only[0].path == "/data/data/com.other/databases/other.db"
+
+
+class TestCoverageCalculations:
+    """Tests that coverage statistics are calculated correctly."""
+
+    def test_all_mapped(self):
+        """When every backup file maps to a filesystem file, coverage = 100%."""
+        backup_files = [
+            _file("com.a", "db", "a.db"),
+            _file("com.a", "sp", "prefs.xml"),
+        ]
+        fs_files = [
+            FilesystemFile("/data/data/com.a/databases/a.db", 1024, False, platform="android"),
+            FilesystemFile("/data/data/com.a/shared_prefs/prefs.xml", 512, False, platform="android"),
+        ]
+        mapper = _make_mapper(backup_files, fs_files)
+        mapper.map_all()
+
+        assert mapper.statistics.mapped_files == 2
+        assert mapper.statistics.not_found_files == 0
+        assert mapper.statistics.unmappable_files == 0
+        assert mapper.statistics.backup_only_files == 0
+        assert mapper.statistics.filesystem_only_files == 0
+        assert mapper.statistics.backup_coverage_percent == pytest.approx(100.0)
+
+    def test_no_backup_files(self):
+        """When backup is empty, coverage should be 0%."""
+        fs_files = [
+            FilesystemFile("/data/data/com.a/databases/a.db", 1024, False, platform="android"),
+        ]
+        mapper = _make_mapper([], fs_files)
+        mapper.map_all()
+
+        assert mapper.statistics.mapped_files == 0
+        assert mapper.statistics.backup_coverage_percent == pytest.approx(0.0)
+        assert mapper.statistics.filesystem_only_files == 1
+
+    def test_no_filesystem_files(self):
+        """When filesystem is empty, coverage stays 0% (no division by zero)."""
+        bf = _file("com.a", "db", "a.db")
+        mapper = _make_mapper([bf], [])
+        mapper.map_all()
+
+        assert mapper.statistics.backup_coverage_percent == pytest.approx(0.0)
+        assert mapper.statistics.not_found_files == 1
+        assert mapper.statistics.backup_only_files == 1
+
+    def test_mixed_statuses(self):
+        """Verify counts and percentages with mapped, not_found, and unmappable."""
+        backup_files = [
+            _file("com.a", "db", "a.db"),          # will map
+            _file("com.missing", "r", "file.txt"),  # not found
+            _file("com.b", "_manifest", ""),         # unmappable
+        ]
+        fs_files = [
+            FilesystemFile("/data/data/com.a/databases/a.db", 1024, False, platform="android"),
+            FilesystemFile("/data/data/com.a/databases/extra.db", 256, False, platform="android"),
+        ]
+        mapper = _make_mapper(backup_files, fs_files)
+        mapper.map_all()
+
+        assert mapper.statistics.total_backup_files == 3
+        assert mapper.statistics.total_filesystem_files == 2
+        assert mapper.statistics.mapped_files == 1
+        assert mapper.statistics.not_found_files == 1
+        assert mapper.statistics.unmappable_files == 1
+        assert mapper.statistics.backup_only_files == 2
+        assert mapper.statistics.filesystem_only_files == 1
+        # Coverage = 1 mapped / 2 filesystem = 50%
+        assert mapper.statistics.backup_coverage_percent == pytest.approx(50.0)
+
+    def test_backup_only_is_sum_of_notfound_and_unmappable(self):
+        """backup_only_files should always equal not_found + unmappable."""
+        backup_files = [
+            _file("com.a", "r", "a.txt"),
+            _file("com.b", "r", "b.txt"),
+            _file("com.c", "_manifest", ""),
+            _file("com.d", "zzz", "x.txt"),
+        ]
+        mapper = _make_mapper(backup_files, [])
+        mapper.map_all()
+
+        assert mapper.statistics.backup_only_files == (
+            mapper.statistics.not_found_files + mapper.statistics.unmappable_files
+        )

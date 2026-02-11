@@ -242,3 +242,86 @@ class TestPathMapperMapAll:
         mapper.map_all()
 
         assert mapper.statistics.mapped_files == 1
+
+
+class TestCoverageCalculations:
+    """Tests that coverage statistics are calculated correctly."""
+
+    def test_all_mapped(self):
+        """When every backup file maps to a filesystem file, coverage = 100%."""
+        bf1 = _ios_file("HomeDomain", "Library/SMS/sms.db")
+        bf2 = _ios_file("HomeDomain", "Library/other.db")
+        fs_files = [
+            FilesystemFile("/private/var/mobile/Library/SMS/sms.db", 1024, False, platform="ios"),
+            FilesystemFile("/private/var/mobile/Library/other.db", 512, False, platform="ios"),
+        ]
+        mapper = _make_ios_mapper([bf1, bf2], fs_files)
+        mapper.map_all()
+
+        assert mapper.statistics.mapped_files == 2
+        assert mapper.statistics.not_found_files == 0
+        assert mapper.statistics.unmappable_files == 0
+        assert mapper.statistics.backup_only_files == 0
+        assert mapper.statistics.filesystem_only_files == 0
+        assert mapper.statistics.backup_coverage_percent == pytest.approx(100.0)
+
+    def test_no_backup_files(self):
+        """When backup is empty, coverage should be 0%."""
+        fs_files = [
+            FilesystemFile("/private/var/mobile/Library/SMS/sms.db", 1024, False, platform="ios"),
+        ]
+        mapper = _make_ios_mapper([], fs_files)
+        mapper.map_all()
+
+        assert mapper.statistics.mapped_files == 0
+        assert mapper.statistics.backup_coverage_percent == pytest.approx(0.0)
+        assert mapper.statistics.filesystem_only_files == 1
+
+    def test_no_filesystem_files(self):
+        """When filesystem is empty, coverage stays 0% (no division by zero)."""
+        bf = _ios_file("HomeDomain", "Library/SMS/sms.db")
+        mapper = _make_ios_mapper([bf], [])
+        mapper.map_all()
+
+        assert mapper.statistics.backup_coverage_percent == pytest.approx(0.0)
+        assert mapper.statistics.not_found_files == 1
+        assert mapper.statistics.backup_only_files == 1
+
+    def test_mixed_statuses(self):
+        """Verify counts and percentages with a mix of mapped, not_found, unmappable."""
+        backup_files = [
+            _ios_file("HomeDomain", "Library/SMS/sms.db"),      # will map
+            _ios_file("HomeDomain", "Library/missing.db"),       # not found
+            _ios_file("UnknownDomain", "file.txt"),              # unmappable
+        ]
+        fs_files = [
+            FilesystemFile("/private/var/mobile/Library/SMS/sms.db", 1024, False, platform="ios"),
+            FilesystemFile("/private/var/mobile/Library/extra.db", 256, False, platform="ios"),
+        ]
+        mapper = _make_ios_mapper(backup_files, fs_files)
+        mapper.map_all()
+
+        assert mapper.statistics.total_backup_files == 3
+        assert mapper.statistics.total_filesystem_files == 2
+        assert mapper.statistics.mapped_files == 1
+        assert mapper.statistics.not_found_files == 1
+        assert mapper.statistics.unmappable_files == 1
+        assert mapper.statistics.backup_only_files == 2  # not_found + unmappable
+        assert mapper.statistics.filesystem_only_files == 1  # extra.db
+        # Coverage = 1 mapped / 2 filesystem = 50%
+        assert mapper.statistics.backup_coverage_percent == pytest.approx(50.0)
+
+    def test_backup_only_is_sum_of_notfound_and_unmappable(self):
+        """backup_only_files should always equal not_found + unmappable."""
+        backup_files = [
+            _ios_file("HomeDomain", "Library/a.db"),
+            _ios_file("HomeDomain", "Library/b.db"),
+            _ios_file("UnknownDomain", "c.txt"),
+            _ios_file("UnknownDomain", "d.txt"),
+        ]
+        mapper = _make_ios_mapper(backup_files, [])
+        mapper.map_all()
+
+        assert mapper.statistics.backup_only_files == (
+            mapper.statistics.not_found_files + mapper.statistics.unmappable_files
+        )
