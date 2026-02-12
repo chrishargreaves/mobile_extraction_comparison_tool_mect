@@ -64,7 +64,6 @@ python compare_cli.py <backup_path> <filesystem_path> [options]
 | Flag | Description |
 |---|---|
 | `-o`, `--output` | Output format: `stats` (default), `detailed`, `domains`, `json`, `csv-unmapped`, `csv-fs-only`, `csv-all` |
-| `-p`, `--password` | Password for encrypted backups |
 | `-q`, `--quiet` | Suppress progress messages |
 
 **Examples:**
@@ -73,8 +72,8 @@ python compare_cli.py <backup_path> <filesystem_path> [options]
 # Basic comparison with summary stats
 python compare_cli.py ./backup ./filesystem.tar
 
-# Android encrypted backup
-python compare_cli.py ./backup.ab ./filesystem.tar -p mypassword
+# Android encrypted backup (will prompt for password if needed)
+python compare_cli.py ./backup.ab ./filesystem.tar
 
 # Export all mappings as CSV
 python compare_cli.py ./backup ./filesystem.tar -o csv-all > mappings.csv

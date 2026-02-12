@@ -26,6 +26,7 @@ Examples:
 """
 
 import argparse
+import getpass
 import json
 import sys
 from typing import Optional
@@ -48,26 +49,31 @@ def print_progress(current: int, total: int, message: str):
         print(f"\r{message}", end="", file=sys.stderr)
 
 
-def load_backup(backup_path: str, password: Optional[str] = None):
+def prompt_password():
+    """Prompt the user for a backup password via stdin."""
+    return getpass.getpass("Backup is encrypted. Enter password: ")
+
+
+def load_backup(backup_path: str):
     """Load and parse a backup (auto-detects iOS vs Android)."""
     print(f"Loading backup from: {backup_path}", file=sys.stderr)
 
     if iOSBackupParser.is_ios_backup(backup_path):
-        parser = iOSBackupParser(backup_path, password=password)
-        backup = parser.parse()
+        parser = iOSBackupParser(backup_path)
+        backup = parser.parse(password_callback=prompt_password)
         print(f"  Type: iOS", file=sys.stderr)
         print(f"  Device: {backup.device_name} ({backup.product_type})", file=sys.stderr)
         print(f"  iOS Version: {backup.ios_version}", file=sys.stderr)
     elif AndroidBackupParser.is_android_backup(backup_path):
-        parser = AndroidBackupParser(backup_path, password=password)
-        backup = parser.parse()
+        parser = AndroidBackupParser(backup_path)
+        backup = parser.parse(password_callback=prompt_password)
         print(f"  Type: Android", file=sys.stderr)
         print(f"  Device: {backup.device_name}", file=sys.stderr)
         if backup.android_version:
             print(f"  Android: {backup.android_version}", file=sys.stderr)
     elif ALEXParser.is_alex_extraction(backup_path):
-        parser = ALEXParser(backup_path, password=password)
-        backup = parser.parse(progress_callback=print_progress)
+        parser = ALEXParser(backup_path)
+        backup = parser.parse(password_callback=prompt_password, progress_callback=print_progress)
         print(f"\n  Type: ALEX UFED-style extraction", file=sys.stderr)
         print(f"  Device: {backup.device_name}", file=sys.stderr)
         if backup.android_version:
@@ -408,7 +414,6 @@ Examples:
                         choices=["stats", "detailed", "domains", "json", "csv-unmapped", "csv-fs-only", "csv-all"],
                         default="stats",
                         help="Output format (default: stats)")
-    parser.add_argument("-p", "--password", help="Password for encrypted backup")
     parser.add_argument("-q", "--quiet", action="store_true",
                         help="Suppress progress messages")
 
@@ -421,7 +426,7 @@ Examples:
             import os
             sys.stderr = open(os.devnull, 'w')
 
-        backup = load_backup(args.backup_path, args.password)
+        backup = load_backup(args.backup_path)
         filesystem = load_filesystem(args.filesystem_path)
         mapper = run_comparison(backup, filesystem)
 
