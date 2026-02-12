@@ -2,7 +2,7 @@
 
 # MECT — Mobile Extraction Comparison Tool
 
-A tool for comparing mobile device backups against filesystem acquisitions. 
+A tool for comparing mobile device backups against filesystem acquisitions. In order to help with learning about the relationships between different backup formats, MECT also allows you to select a file in a backup and it will locate that file in the file system extraction. 
 
 Provides both a Tkinter GUI and a command-line interface.
 
